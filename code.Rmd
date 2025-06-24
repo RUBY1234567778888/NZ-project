@@ -1,0 +1,2529 @@
+---
+title: "final project"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+---
+### Cleaning data ###
+```{r}     
+library(openxlsx) 
+library(dplyr)
+library(tableone)
+library(tidyr)
+library(readxl)
+library(lubridate)
+
+#read data
+variable_mapping <- read_excel("C:/Users/ruby zhong/OneDrive/桌面/STUDY/final project/combined data/NZ_data_request_variables_explained_draft_for_Rundi(Sheet1).xlsx")
+
+eligibility <- read.csv("C:\\Users\\ruby zhong\\OneDrive\\桌面\\STUDY\\final project\\data\\Alleligibility-currentvalues_2024-10-29_0941(1).csv", stringsAsFactors = FALSE)
+baseline <- read.csv("C:\\Users\\ruby zhong\\OneDrive\\桌面\\STUDY\\final project\\data\\Baselineexport_2024-10-29_0941(2).csv", stringsAsFactors = FALSE)
+microbiology <- read.csv("C:\\Users\\ruby zhong\\OneDrive\\桌面\\STUDY\\final project\\data\\Microbiologyexport_2024-10-29_0941(1).csv", stringsAsFactors = FALSE)
+discharge <- read.csv("C:\\Users\\ruby zhong\\OneDrive\\桌面\\STUDY\\final project\\data\\Dischargeexport_2024-10-29_0941(1).csv", stringsAsFactors = FALSE)
+registry <- read.csv("C:\\Users\\ruby zhong\\OneDrive\\桌面\\STUDY\\final project\\data\\NZLongRegistryCRFExport_2024-10-29_0942(1).csv", stringsAsFactors = FALSE)
+
+randomised_participants <- eligibility %>%
+  filter(!is.na(StudyPatientID))
+
+registry_participants <- registry %>%
+  filter(!is.na(RegistryPatientID))
+
+randomised_data <- randomised_participants %>%
+  left_join(baseline, by = "StudyPatientID") %>%
+  left_join(microbiology, by = "StudyPatientID") %>%
+  left_join(discharge, by = "StudyPatientID")
+
+registry_data <- registry_participants %>%
+  left_join(eligibility, by = "RegistryPatientID") %>%
+  left_join(registry, by = "RegistryPatientID") 
+
+#remove the unneeded data
+remove_ids <- c("0201600024", "0201600052", "0201600065", "0201600080", 
+                "0203800014", "0203800027", "0203800079", "0203800087", 
+                "0220700038", "0222500040", "0222700018", "0225100004", 
+                "0225100021", "0225100035", "0226800003", "0226800023", 
+                "0226800025", "0226800064")
+
+##Create not in trial data
+randomised_data <- randomised_data[ !randomised_data$StudyPatientID %in% remove_ids, ]
+
+#Generated data
+write.xlsx(randomised_data, "C:\\Users\\ruby zhong\\OneDrive\\桌面\\STUDY\\final project\\combined data\\RandomisedData.xlsx", rowNames = FALSE)
+registry_data <- registry_data %>%
+  filter(!is.na(RegistryPatientID) & RegistryPatientID != "")
+write.xlsx(registry_data, "C:\\Users\\ruby zhong\\OneDrive\\桌面\\STUDY\\final project\\combined data\\RegistryData.xlsx", rowNames = FALSE)
+```
+
+
+```{r}
+library(dplyr)
+
+randomised_yes <- subset(randomised_data, EL_Pandemic_Infection == "Yes")
+registry_yes <- subset(registry_data, EL_Pandemic_Infection == "Yes")
+
+# Randomised
+randomised_data <- randomised_data %>%
+  filter(
+    EL_InICU != "Not in ICU"  
+  ) %>%
+  filter(
+    EL_NursingHomeResident != "Yes"  
+  ) %>%
+  filter(
+    EL_InpatientAtHealthcareFacilty != "Yes"  
+  ) %>%
+  filter(
+    EL_RadiologicalEvidence != "No"  
+  ) %>%
+  filter(
+    EL_CAPPrimaryAdmissionReason != "No"  
+  ) %>%
+  mutate(
+    EL_HospAdmission = as.POSIXct(
+      EL_HospAdmission,
+      format = "%d/%m/%Y %H:%M",
+      tz = "UTC"
+    ),
+    EL_ICUAdmission = as.POSIXct(
+      EL_ICUAdmission,
+      format = "%d/%m/%Y %H:%M",
+      tz = "UTC"
+    ),
+    hours_diff = as.numeric(
+      difftime(EL_ICUAdmission, EL_HospAdmission, units = "hours")
+    ),
+    to_remove = (EL_Pandemic_Infection != "Yes") & (hours_diff > 48)
+  ) %>%
+  filter(!to_remove)  
+
+# Registry
+registry_data <- registry_data %>%
+  filter(
+    EL_NursingHomeResident == "No" &
+    EL_InpatientAtHealthcareFacilty == "No" &  
+    EL_LRTI == "Yes" &  
+    EL_RadiologicalEvidence == "Yes" &  
+    EL_CAPPrimaryAdmissionReason == "Yes" &  
+    EL_ImminentDeathOrNonActiveTreatment == "No" & 
+    (EL_VentHighFlow48 == "Yes" |
+     EL_NonInvasiveVent48 == "Yes" |
+     EL_InvasiveVent48 == "Yes" |
+     EL_VassopressorInotropes48 == "Yes") 
+    ) 
+
+nrow(registry_data)
+nrow(randomised_data)
+```
+```{r}
+library(dplyr)
+library(stringr)
+clean_xy <- function(df_xy) {
+  df_xy %>%
+    dplyr::select(-dplyr::ends_with(".y")) %>%
+    {
+      dat_xy <- .
+      x_cols_xy     <- grep("\\.x$", names(dat_xy), value = TRUE)
+      base_names_xy <- sub("\\.x$", "", x_cols_xy)
+      dup_bare_xy   <- intersect(base_names_xy, names(dat_xy))
+      dat2_xy       <- dat_xy %>%
+                         dplyr::select(-all_of(dup_bare_xy))
+      dat2_xy %>%
+        dplyr::rename_with(~ sub("\\.x$", "", .x), all_of(x_cols_xy))
+    }
+}
+
+registry_data   <- clean_xy(registry_data)
+randomised_data <- clean_xy(randomised_data)
+
+stopifnot(length(grep("\\.x$|\\.y$", names(registry_data))) == 0)
+stopifnot(length(grep("\\.x$|\\.y$", names(randomised_data))) == 0)
+
+registry_data <- registry_data %>%
+  rename_with(~ gsub("^RegBas_", "Bas_", .), matches("^RegBas_"))
+
+randomised_data <- randomised_data %>%
+  mutate(StudyPatientID  = as.character(StudyPatientID))
+
+registry_data <- registry_data %>%
+  mutate(RegistryPatientID = as.character(RegistryPatientID))
+
+merged_xy <- left_join(
+  randomised_data,
+  registry_data,
+  by = c("StudyPatientID" = "RegistryPatientID")
+)
+merged_xy <- clean_xy(merged_xy)
+```
+
+### Category for analysis--Baseline demographic variable ###
+#About Ethnicity
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(tibble)
+library(tableone)
+library(lubridate)
+
+registry_data <- registry_data %>%
+  rename_with(
+    ~ gsub("^RegBas_", "Bas_", .),
+    matches("^RegBas_")
+  )
+
+combined_data <- bind_rows(
+  randomised_data %>%
+    mutate(
+      across(where(is.integer), as.character),
+      across(where(is.POSIXt),   as.character),
+      in_trial = "Yes"
+    ),
+  registry_data %>%
+    mutate(
+      across(where(is.integer), as.character),
+      across(where(is.POSIXt),   as.character),
+      in_trial = "No"
+    )
+)
+
+baseline_demo_vars_ethnicity <- variable_mapping %>%
+  filter(`Category for analysis` == "Baseline demographic variable") %>%
+  pull(DbField) %>%
+  setdiff(c("EL_Sex", "EL_AgeAtFirstEntry"))
+
+existing_vars <- names(combined_data)[str_detect(names(combined_data), "^Bas_NZEthnicity")]
+
+valid_vars_initial <- intersect(baseline_demo_vars_ethnicity, existing_vars)
+
+valid_vars <- valid_vars_initial[
+  vapply(
+    valid_vars_initial,
+    function(varname) any(!is.na(combined_data[[varname]])),
+    logical(1)
+  )
+]
+
+table1_race <- CreateTableOne(
+  vars   = valid_vars,
+  strata = "in_trial",
+  data   = combined_data,
+  test   = TRUE
+)
+print(table1_race)
+```
+
+```{r}
+library(scales)  
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(tibble)  
+library(tableone)
+library(stringr)
+
+table1_df_race <- print(
+  table1_race,
+  printToggle = FALSE,  
+  noSpaces    = TRUE    
+) %>%
+  as.data.frame() %>%                
+  tibble::rownames_to_column("Variable")  
+
+df_clean_ethnicity <- table1_df_race %>%
+  mutate(
+    Ethnicity_raw = gsub("Bas_NZEthnicity|\\s*\\(%\\)", "", Variable),
+    Ethnicity     = case_when(
+      str_detect(Ethnicity_raw, regex("NZMaori|CookIslandMaori", ignore_case = TRUE)) ~ "Māori",
+      str_detect(Ethnicity_raw, regex("PacificIslandNFD|Samoan|Tolelauan|Tongan|Niuean|Fijian|OtherPacificIslands", ignore_case = TRUE)) ~ "Pacific Island",
+      str_detect(Ethnicity_raw, regex("AsianNFD|Chinese|Indian|OtherAsian|SEAsian", ignore_case = TRUE)) ~ "Asian",
+      str_detect(Ethnicity_raw, regex("NZEuropean|EuropeanNFD|otherEuropean", ignore_case = TRUE)) ~ "NZ European",
+      str_detect(Ethnicity_raw, regex("African|LatinAmerican|MiddleEastern|OtherEthnicity|NotKnown", ignore_case = TRUE)) ~ "MELAA and other",
+      TRUE                                                                                      ~ NA_character_
+    ),
+    Registry   = as.numeric(sub("^(\\d+).*", "\\1", No)),
+    Randomised = as.numeric(sub("^(\\d+).*", "\\1", Yes))
+  ) %>%
+  dplyr::select(Ethnicity, Registry, Randomised)
+
+
+clean_data_enthnicity <- df_clean_ethnicity %>%
+  group_by(Ethnicity) %>%
+  summarise(
+    Registry = sum(Registry, na.rm = TRUE),
+    Randomised = sum(Randomised, na.rm = TRUE)
+  ) %>% 
+  ungroup()
+
+#Convert to long format
+long_data_enthnicity <- clean_data_enthnicity %>%
+  pivot_longer(
+    cols = c(Registry, Randomised),
+    names_to = "Group",
+    values_to = "Count"
+  ) %>%
+  mutate(
+    Group = factor(Group, levels = c("Registry", "Randomised"),
+                         labels = c("Registry", "Randomised")),
+    Ethnicity = factor(Ethnicity, levels = c("Māori", "Pacific Island", "Asian", "NZ European", "MELAA and other"))
+  )
+
+ethnicity_table <- long_data_enthnicity %>%
+  pivot_wider(names_from  = Group,
+              values_from = Count,
+              values_fill = 0)
+
+
+print(ethnicity_table)
+
+get_ethnicity_p_value <- function(data) {
+  observed <- data %>%
+    select(Count_Registry, Count_Randomised) %>%
+    as.matrix()
+  
+  chi_test <- chisq.test(observed)
+  p_value <- if (any(chi_test$expected < 5)) {
+    fisher.test(observed)$p.value
+  } else {
+    chi_test$p.value
+  }
+  return(p_value)
+}
+
+# Calculate the total sum of all the counts across all ethnicities
+total_sum <- sum(ethnicity_table$Registry, ethnicity_table$Randomised, na.rm = TRUE)
+
+ethnicity_table_with_percent <- ethnicity_table %>%
+  dplyr::select(Ethnicity, Registry, Randomised) %>%
+  mutate(
+    Registry   = paste0(Registry,   " (", round(Registry   / total_sum * 100, 1), "%)"),
+    Randomised = paste0(Randomised, " (", round(Randomised / total_sum * 100, 1), "%)")
+  )
+
+#ethnicity_table_with_percent
+
+get_ethnicity_p_value <- function(data_temp) {
+  data2_temp <- data_temp %>%
+    dplyr::select(Count_Registry, Count_Randomised) %>%
+    {
+      tbl <- matrix(c(.$Count_Registry, .$Count_Randomised),
+                    nrow = 1, byrow = TRUE)
+      test <- stats::chisq.test(tbl, correct = FALSE)
+      test$p.value
+    }
+  
+  return(data2_temp)
+}
+
+
+ethnicity_table_for_p <- ethnicity_table %>%
+  dplyr::rename(
+    Count_Registry   = Registry,
+    Count_Randomised = Randomised
+  )
+
+ethnicity_p_values <- ethnicity_table_for_p %>%
+  dplyr::group_by(Ethnicity) %>%
+  dplyr::summarise(
+    p_value = get_ethnicity_p_value(dplyr::cur_data())
+  ) %>%
+  dplyr::mutate(
+    Significance = ifelse(p_value < 0.05, "*", "")
+  )
+
+print(ethnicity_p_values)
+
+#plot
+clean_data <- long_data_enthnicity %>%
+  filter(!is.na(Ethnicity) & !is.na(Group))
+
+ggplot(clean_data, aes(x = Ethnicity, y = Count, fill = Group)) +
+  geom_col(position = "fill", width = 0.7) +
+  geom_text(aes(label = percent(Count / tapply(Count, Ethnicity, sum)[Ethnicity])), 
+            position = position_fill(vjust = 0.5), size = 3) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "Figure1.1 : Ethnicity Distribution by Trial Participation (Proportions)",
+       x = "Ethnic Group", y = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Set1")
+
+plot_data_prop_en <- long_data_enthnicity %>%
+  filter(!is.na(Ethnicity)) %>%    # ← drop any NA‐ethnicity rows
+  group_by(Group) %>%
+  mutate(Proportion = Count / sum(Count)) %>%
+  ungroup()
+
+ggplot(plot_data_prop_en, aes(x = Ethnicity, y = Proportion, fill = Group)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = percent(Proportion)),
+            position = position_dodge(width = 0.7),
+            vjust = -0.3, size = 3) +
+  scale_y_continuous(labels = percent_format(), limits = c(0, max(plot_data_prop_en$Proportion) * 1.1)) +
+  labs(title = "Figure 1.2: Proportion of Each Ethnic Group by Registry vs Randomised",
+       x = "Ethnic Group", y = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Set1")
+```
+### Category for analysis--Baseline demographic variable ###
+#About age
+```{r}
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(ggplot2)
+combined_data$Age <- as.numeric(combined_data$EL_AgeAtFirstEntry)
+
+# calculate mean Age
+age_means <- combined_data %>%
+  group_by(in_trial) %>%
+  summarise(mean_age = mean(Age, na.rm = TRUE)) %>%
+  pivot_wider(
+    names_from  = in_trial,
+    values_from = mean_age
+  ) 
+
+tt_age <- t.test(Age ~ in_trial, data = combined_data, var.equal = TRUE)
+p_age  <- sprintf("%.3f", tt_age$p.value)
+
+df_age <- bind_rows(
+  registry_data   %>% transmute(
+    Age      = as.numeric(EL_AgeAtFirstEntry),
+    in_trial = "Registry"
+  ),
+  randomised_data %>% transmute(
+    Age      = as.numeric(EL_AgeAtFirstEntry),
+    in_trial = "Randomised"
+  )
+) %>%
+  filter(!is.na(Age))
+
+#Table
+age_stats <- df_age %>%
+  group_by(in_trial) %>%
+  summarise(
+    n             = n(),
+    mean_age      = round(mean(Age), 1),
+    sd_age        = round(sd(Age), 1),
+    se_age        = round(sd_age / sqrt(n), 1),
+    ci_lower_age  = round(mean_age - qt(0.975, df = n - 1) * se_age, 1),
+    ci_upper_age  = round(mean_age + qt(0.975, df = n - 1) * se_age, 1),
+    .groups       = "drop"
+  )
+
+kable(
+  age_stats,
+  col.names = c(
+    "Group",
+    "Sample Size (n)",
+    "Mean Age",
+    "SD Age",
+    "SE Age",
+    "95% CI Lower",
+    "95% CI Upper"
+  ),
+  caption = "Table1: Age Statistics with 95% Confidence Intervals for Registry vs Randomised"
+)
+
+#Create a boxplot to visualize the age distribution.
+ggplot(combined_data, aes(x = in_trial, y = Age, fill = in_trial)) +
+  geom_boxplot() +
+  labs(title = "Figure2 : Age Distribution by Trial Status",
+       x = "Trial Status",    # x-axis: in_trial groups ("Yes" for in trial, "No" for not in trial)
+       y = "Age") +
+  scale_fill_manual(values = c("No" = "red", "Yes" = "green"),
+                    labels = c("Not in Trial", "In Trial")) +
+  theme_minimal()
+
+#Perform a t-test to compare the age between the two groups.
+t_test_result_AgeAtFirstEntry <- t.test(Age ~ in_trial, data = combined_data)
+print(t_test_result_AgeAtFirstEntry)
+```
+
+### Category for analysis--Baseline demographic variable ###
+#About sex
+```{r}
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+registry_sex <- registry_data %>%
+  filter(!is.na(RegistryPatientID) & RegistryPatientID != "") %>%
+  distinct(RegistryPatientID, .keep_all = TRUE) %>%
+  count(EL_Sex, name = "count") %>%
+  mutate(group = "Registry")
+
+randomised_sex <- randomised_data %>%
+  count(EL_Sex, name = "count") %>%
+  mutate(group = "Randomised")
+
+combined_sex <- bind_rows(
+  registry_sex,
+  randomised_sex
+) %>%
+  mutate(
+    EL_Sex = factor(
+      EL_Sex,
+      levels = c("Male", "Female"),
+      labels = c("Male", "Female")
+    )
+  ) %>%
+  tidyr::complete(group, EL_Sex, fill = list(count = 0))
+
+combined_sex_clean <- combined_sex %>%
+  filter(!is.na(EL_Sex))
+
+contingency_sex <- combined_sex_clean %>%
+  dplyr::select(group, EL_Sex, count) %>%
+  tidyr::pivot_wider(
+    names_from  = group,
+    values_from = count,
+    values_fill = list(count = 0)
+  ) %>%
+  tibble::column_to_rownames("EL_Sex")
+
+print(contingency_sex)
+
+
+combined_sex_with_prop <- combined_sex_clean %>%
+  group_by(group) %>%
+  mutate(
+    total_count = sum(count, na.rm = TRUE),      
+    prop = count / total_count * 100          
+  ) %>%
+  ungroup()
+
+# Calculate the proportions for Registry and Randomised groups
+combined_sex_with_prop <- combined_sex %>%
+  group_by(group) %>%
+  mutate(
+    total_count = sum(count),  # Calculate the total count for each group
+    prop = count / total_count * 100  # Calculate the proportion
+  ) %>%
+  ungroup()
+
+contingency_sex <- combined_sex %>%
+  dplyr::filter(!is.na(EL_Sex)) %>%                              
+  dplyr::select(group, EL_Sex, count) %>%                        
+  tidyr::pivot_wider(
+    names_from  = group,
+    values_from = count,
+    values_fill = list(count = 0)                               
+  ) %>%
+  tibble::column_to_rownames("EL_Sex")   
+
+test_sex <- chisq.test(as.matrix(contingency_sex))
+p_sex    <- test_sex$p.value
+
+sex_summary_final <- combined_sex_with_prop %>%
+  tidyr::pivot_wider(
+    id_cols     = EL_Sex,
+    names_from  = group,
+    values_from = c(count, prop),
+    names_sep   = "_"
+  ) %>%
+  dplyr::mutate(
+    Registry   = sprintf("%d (%.1f%%)", count_Registry,    prop_Registry),
+    Randomised = sprintf("%d (%.1f%%)", count_Randomised, prop_Randomised),
+    p_value    = if_else(
+      row_number() == 1,
+      format.pval(p_sex, digits = 3),
+      ""
+    ),
+    test_used  = if_else(
+      row_number() == 1,
+      "Chi-squared test",
+      ""
+    )
+  ) %>%
+  dplyr::select(
+    Sex        = EL_Sex,
+    Registry,
+    Randomised,
+    p_value,
+    test_used
+  )
+print(sex_summary_final)
+
+# Now create the plot
+ggplot(combined_sex_with_prop, aes(x = group, y = prop, fill = EL_Sex)) +
+  geom_col(position = "stack") +
+  geom_text(
+    aes(label = sprintf("%.1f%%", prop)),
+    position = position_stack(vjust = 0.5),
+    color = "black",
+    size = 4
+  ) +
+  labs(
+    title = "Figure3 : Gender Proportion by Group",
+    x = NULL,
+    y = "Percentage (%)",
+    fill = "Sex"
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+### Category for analysis--Baseline clinical variable ###
+#Height, Weight and BMI
+```{r}
+library(dplyr)
+library(stringr)
+library(tibble)
+
+clean_num <- function(x) {
+  as.numeric(gsub(",", "", as.character(x)))
+}
+
+clean_xy <- function(df_xy) {
+  df_xy %>%
+    dplyr::select(-dplyr::ends_with(".y")) %>%
+    {
+      dat_xy <- .
+      x_cols_xy     <- grep("\\.x$", names(dat_xy), value = TRUE)
+      base_names_xy <- sub("\\.x$", "", x_cols_xy)
+      dup_bare_xy   <- intersect(base_names_xy, names(dat_xy))
+      dat2_xy       <- dat_xy %>%
+                         dplyr::select(-all_of(dup_bare_xy))
+      dat2_xy %>%
+        dplyr::rename_with(~ sub("\\.x$", "", .x), all_of(x_cols_xy))
+    }
+}
+
+prep_data <- function(df4, prefix, group_label) {
+  cols <- colnames(df4)
+  wcol <- grep(paste0("^", prefix, "_Weight$"),   cols, ignore.case = TRUE, value = TRUE)
+  hcol <- grep(paste0("^", prefix, "_HeightCM$"), cols, ignore.case = TRUE, value = TRUE)
+  if (length(wcol) != 1 || length(hcol) != 1) {
+    stop("Couldn't unambiguously find Weight/HeightCM columns with prefix = ", prefix)
+  }
+
+  df4 %>%
+    mutate(
+      weight = clean_num(.data[[wcol]]),
+      height = clean_num(.data[[hcol]]),
+      bmi    = weight / ((height / 100)^2),
+      group  = group_label
+    ) %>%
+    filter(!is.na(weight), !is.na(height))
+}
+
+registry_clean   <- clean_xy(registry_data)
+randomised_clean <- clean_xy(randomised_data)
+
+#names(registry_clean)   [stringr::str_detect(names(registry_clean), "\\.x$|\\.y$")] 
+#names(randomised_clean)[stringr::str_detect(names(randomised_clean), "\\.x$|\\.y$")]
+
+registry_clean <- registry_clean %>%
+  rename_with(~ gsub("^RegBas_", "Bas_", .), matches("^RegBas_"))
+
+randomised_clean <- randomised_clean %>%
+  rename_with(~ gsub("^RegBas_", "Bas_", .), matches("^RegBas_"))
+
+registry_clean <- registry_clean %>%
+  mutate(RegistryPatientID = as.character(RegistryPatientID))
+randomised_clean <- randomised_clean %>%
+  mutate(StudyPatientID = as.character(StudyPatientID))
+
+registry_data   <- prep_data(registry_clean,   prefix = "Bas", group_label = "Registry")
+randomised_data <- prep_data(randomised_clean, prefix = "Bas", group_label = "Randomised")
+
+
+get_stats <- function(var) {
+  x_reg <- registry_data[[var]]
+  x_ran <- randomised_data[[var]]
+
+  if (is.null(x_reg) || is.null(x_ran)) {
+    stop("Variable ", var, " not found in one of the data sets.")
+  }
+
+  reg_mean <- mean(x_reg, na.rm = TRUE)
+  ran_mean <- mean(x_ran, na.rm = TRUE)
+  reg_sd   <- sd(x_reg, na.rm = TRUE)
+  ran_sd   <- sd(x_ran, na.rm = TRUE)
+  reg_n    <- length(x_reg)
+  ran_n    <- length(x_ran)
+
+  reg_se <- reg_sd / sqrt(reg_n)
+  ran_se <- ran_sd / sqrt(ran_n)
+
+  ci_low_reg <- reg_mean - 1.96 * reg_se
+  ci_high_reg <- reg_mean + 1.96 * reg_se
+  ci_low_ran <- ran_mean - 1.96 * ran_se
+  ci_high_ran <- ran_mean + 1.96 * ran_se
+
+  reg_mean_r <- round(reg_mean, 1)
+  ran_mean_r <- round(ran_mean, 1)
+  reg_sd_r   <- round(reg_sd, 1)
+  ran_sd_r   <- round(ran_sd, 1)
+  ci_reg_str <- paste0(round(ci_low_reg, 1), " to ", round(ci_high_reg, 1))
+  ci_ran_str <- paste0(round(ci_low_ran, 1), " to ", round(ci_high_ran, 1))
+
+  if (var == "bmi") {
+    p_val <- t.test(x_ran, x_reg)$p.value
+    p_str_reg <- sprintf("%.3f", p_val)
+    p_str_ran <- ""
+  } else {
+    p_str_reg <- ""
+    p_str_ran <- ""
+  }
+
+  tibble(
+    Variable = var,
+    Group    = c("Registry", "Randomised"),
+    N        = c(reg_n, ran_n),
+    Mean     = c(reg_mean_r, ran_mean_r),
+    SD       = c(reg_sd_r, ran_sd_r),
+    CI       = c(ci_reg_str, ci_ran_str),
+    P_value  = c(p_str_reg, p_str_ran)
+  )
+}
+
+results <- bind_rows(
+  get_stats("height"),
+  get_stats("weight"),
+  get_stats("bmi")
+)
+
+kable(
+  results,
+  caption   = "Table2: Comparison of baseline characteristics",
+  col.names = c("Variable", "Grouping", "n", "Mean", "Standard deviation", "95% CI", "p value")
+)
+
+reg_for_model <- registry_data %>%
+  transmute(
+    bmi,
+    height,
+    weight,
+    EL_AgeAtFirstEntry = as.numeric(EL_AgeAtFirstEntry)
+  )
+
+ran_for_model <- randomised_data %>%
+  transmute(
+    bmi,
+    height,
+    weight,
+    EL_AgeAtFirstEntry = as.numeric(EL_AgeAtFirstEntry)
+  )
+
+model_df <- bind_rows(
+  reg_for_model   %>% mutate(group = "Registry"),
+  ran_for_model   %>% mutate(group = "Randomised")
+)
+
+lm_model <- lm(bmi ~ height + weight + EL_AgeAtFirstEntry, data = model_df)
+summary(lm_model)
+
+#plot
+ggplot() +
+  geom_boxplot(data = registry_data,   aes(x = "Registry",   y = bmi, fill = "Registry")) +
+  geom_boxplot(data = randomised_data, aes(x = "Randomised", y = bmi, fill = "Randomised")) +
+  scale_fill_manual(values = c("Registry"   = "#66c2a5",
+                               "Randomised" = "#fc8d62")) +
+  labs(
+    title = "Figure 4: BMI Distribution",
+    x     = NULL,
+    y     = "BMI (kg/m^2)"        # <<– ASCII caret
+  ) +
+  theme_minimal()
+
+p_reg <- ggplot(registry_data, aes(x = height, y = weight)) +
+  geom_point(color = "#66c2a5") +
+  geom_smooth(method = "lm", color = "#66c2a5", se = FALSE) +
+  labs(title = "Registry Group", x = "Height (cm)", y = "Weight (kg)")
+
+p_ran <- ggplot(randomised_data, aes(x = height, y = weight)) +
+  geom_point(color = "#fc8d62") +
+  geom_smooth(method = "lm", color = "#fc8d62", se = FALSE) +
+  labs(title = "Randomised Group", x = "Height (cm)", y = "Weight (kg)")
+```
+#diabetes
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+
+count_diabetes <- function(df, group_name) {
+  df %>%
+    mutate(
+      Diabetes = case_when(
+        is.na(Bas_Diabetes) | trimws(Bas_Diabetes) == ""  ~ "Missing",
+        Bas_Diabetes == "Not diagnosed with diabetes"     ~ "No diabetes",
+        Bas_Diabetes %in% c("Type 1 diabetes", "Type 2 diabetes") ~ Bas_Diabetes,
+        TRUE                                              ~ "Other"
+      )
+    ) %>%
+    count(Diabetes) %>%
+    mutate(
+      prop = n / sum(n) * 100,
+      !!group_name := sprintf("%d (%.1f%%)", n, prop)
+    ) %>%
+    dplyr::select(-prop)
+}
+
+dia_counts <- full_join(
+  count_diabetes(registry_data,   "Registry"),
+  count_diabetes(randomised_data, "Randomised"),
+  by = "Diabetes"
+) %>%
+  dplyr::select(Diabetes, Registry, Randomised) %>%
+  tidyr::replace_na(list(Registry   = "0 (0.0%)",
+                         Randomised = "0 (0.0%)")) %>%
+  arrange(
+    factor(
+      Diabetes,
+      levels = c("Type 1 diabetes", "Type 2 diabetes", "No diabetes", "Missing", "Other")
+    )
+  )
+
+ctab <- registry_data %>%
+  mutate(
+    Diabetes = ifelse(
+      is.na(Bas_Diabetes) | trimws(Bas_Diabetes) == "",
+      "Missing",
+      Bas_Diabetes
+    )
+  ) %>%
+  count(Diabetes) %>%
+  full_join(
+    randomised_data %>%
+      mutate(
+        Diabetes = ifelse(
+          is.na(Bas_Diabetes) | trimws(Bas_Diabetes) == "",
+          "Missing",
+          Bas_Diabetes
+        )
+      ) %>%
+      count(Diabetes),
+    by = "Diabetes"
+  ) %>%
+  replace_na(list(n.x = 0, n.y = 0)) %>%
+  dplyr::select(-Diabetes) %>%    
+  as.matrix()
+
+if (any(ctab < 5)) {
+  test   <- fisher.test(ctab, simulate.p.value = TRUE)
+  method <- "Fisher's exact"
+} else {
+  test   <- chisq.test(ctab)
+  method <- "Chi-squared"
+}
+
+final_dia <- dia_counts %>%
+  mutate(
+    p_value = ifelse(
+      row_number() == 1,
+      sprintf("%.3f (%s test)", test$p.value, method),
+      ""
+    )
+  )
+
+knitr::kable(
+  final_dia,
+  col.names = c("Diabetes Status", "Registry Group", "Randomised Group", "p-value"),
+  caption   = "Table3: Diabetes Status Comparison Between Groups",
+  align     = c("l", "r", "r", "l")
+) %>%
+  kableExtra::kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+#plot
+plot_data <- bind_rows(
+  registry_data   %>% dplyr::select(Bas_Diabetes) %>% mutate(Group = "Registry"),
+  randomised_data %>% dplyr::select(Bas_Diabetes) %>% mutate(Group = "Randomised")
+) %>%
+  mutate(
+    Diabetes = case_when(
+      is.na(Bas_Diabetes) | trimws(Bas_Diabetes) == ""              ~ "Missing",
+      Bas_Diabetes == "Not diagnosed with diabetes"                  ~ "No diabetes",
+      Bas_Diabetes %in% c("Type 1 diabetes", "Type 2 diabetes")      ~ Bas_Diabetes,
+      TRUE                                                            ~ "Other"
+    )
+  ) %>%
+  count(Group, Diabetes) %>%
+  group_by(Group) %>%
+  mutate(prop = n / sum(n))
+
+ggplot(plot_data, aes(x = Group, y = prop, fill = Diabetes)) +
+  geom_col(position = "stack") +
+  geom_text(
+    aes(label = scales::percent(prop, accuracy = 0.1)),
+    position = position_stack(vjust = 0.5),
+    color = "white", size = 3.5
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Figure5: Diabetes Status Distribution by Group",
+    x = NULL, 
+    y = "Percentage", 
+    fill = "Diabetes Status"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+#Immunosuppressive disease and treatment 
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+immune_vars <- c(
+  "Immunosuppressive_treatment" = "Bas_ImmTreatment",
+  "AIDS"                        = "Bas_id_AIDS",
+  "Acute_leukaemia"             = "Bas_id_AcuteLeukaemia",
+  "Lymphoma"                    = "Bas_id_Lymphoma",
+  "Metastatic_cancer"           = "Bas_id_MetaCancer",
+  "Myeloma"                     = "Bas_id_Myeloma",
+  "Other_immunosuppression"     = "Bas_id_Other"
+)
+
+analyze_immune_var <- function(var_name, orig_name) {
+  reg <- registry_data    %>% transmute(group = "Registry",    raw = as.character(.data[[orig_name]]))
+  ran <- randomised_data %>% transmute(group = "Randomised", raw = as.character(.data[[orig_name]]))
+  
+  df <- bind_rows(reg, ran) %>%
+    mutate(
+      value = tolower(raw),
+      value = case_when(
+        value %in% c("yes","y","true","1")  ~ "Yes",
+        value %in% c("no", "n","false","0") ~ "No",
+        TRUE                                 ~ NA_character_
+      )
+    ) %>%
+    filter(!is.na(value))
+  
+  counts <- df %>%
+    count(group, value) %>%
+    complete(
+      group = c("Registry", "Randomised"),
+      value = c("Yes", "No"),
+      fill  = list(n = 0)
+    ) %>%
+    pivot_wider(names_from = value, values_from = n)
+  
+  yes_reg <- counts$Yes[counts$group == "Registry"]
+  yes_ran <- counts$Yes[counts$group == "Randomised"]
+  N_reg   <- nrow(registry_data)
+  N_ran   <- nrow(randomised_data)
+  
+  test   <- suppressWarnings(
+    prop.test(
+      x       = c(yes_reg, yes_ran),
+      n       = c(N_reg,    N_ran),
+      correct = FALSE
+    )
+  )
+  
+  pval    <- test$p.value
+  p_label <- if (pval < 0.001) "<0.001" else sprintf("%.3f", pval)
+
+  tibble(
+    Variable         = var_name,
+    `Registry (n)`    = yes_reg,
+    `Randomised (n)`  = yes_ran,
+    `Registry (%)`    = round(yes_reg / N_reg * 100, 1),
+    `Randomised (%)`  = round(yes_ran / N_ran * 100, 1),
+    `p-value`         = p_label,
+    `Test Method`     = "prop.test (no correction)"
+  )
+}
+
+immune_results <- purrr::imap_dfr(immune_vars, ~ analyze_immune_var(.y, .x))
+immune_results %>%
+  select(-`Test Method`) %>%
+  kable(
+    col.names = c(
+      "Condition/Treatment",
+      "Registry (n)", "Randomised (n)",
+      "Registry (%)", "Randomised (%)",
+      "p-value"
+    ),
+    caption = "Table4: Immunosuppressive Conditions and Treatments Comparison"
+  ) %>%
+  kable_styling("striped", full_width = FALSE)
+```
+
+#Organ support level
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(knitr)
+
+process_organ_data <- function(df7, group_name) {
+  df7 %>%
+    dplyr::select(EL_VassopressorInotropes) %>%
+    dplyr::mutate(
+      Vasopressor_use = ifelse(
+        tolower(EL_VassopressorInotropes) %in% c("yes", "y", "1", "true", "t"), 
+        "Yes", 
+        ifelse(
+          tolower(EL_VassopressorInotropes) %in% c("no", "n", "0", "false", "f"), 
+          "No", 
+          NA_character_
+        )
+      ),
+      Group = group_name
+    ) %>%
+    dplyr::filter(!is.na(Vasopressor_use))
+}
+
+reg_organ <- process_organ_data(registry_data, "Registry")
+ran_organ <- process_organ_data(randomised_data, "Randomised")
+combined_organ <- bind_rows(reg_organ, ran_organ)
+
+organ_test <- if (any(table(combined_organ$Group, combined_organ$Vasopressor_use) < 5)) {
+  fisher.test(table(combined_organ$Group, combined_organ$Vasopressor_use))
+} else {
+  chisq.test(table(combined_organ$Group, combined_organ$Vasopressor_use))
+}
+
+organ_summary <- combined_organ %>%
+  group_by(Group) %>%
+  summarise(
+    Total = n(),
+    Yes_count = sum(Vasopressor_use == "Yes"),
+    Yes_prop = Yes_count / Total,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Yes_display = sprintf("%d (%.1f%%)", Yes_count, Yes_prop*100),
+    CI = sprintf(
+      "%.1f%% to %.1f%%", 
+      binom.test(Yes_count, Total)$conf.int[1]*100,
+      binom.test(Yes_count, Total)$conf.int[2]*100
+    )
+  ) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = c(Total, Yes_count, Yes_prop, Yes_display, CI)
+  ) %>%
+  mutate(
+    p_value = sprintf("%.3f", organ_test$p.value),
+    test_method = ifelse(any(table(combined_organ$Group, combined_organ$Vasopressor_use) < 5),
+                       "Fisher's exact", 
+                       "Chi-squared"),
+    diff_CI = sprintf(
+      "%.1f%% to %.1f%%",
+      prop.test(
+        x = c(.$Yes_count_Randomised, .$Yes_count_Registry),
+        n = c(.$Total_Randomised, .$Total_Registry)
+      )$conf.int[1]*100,
+      prop.test(
+        x = c(.$Yes_count_Randomised, .$Yes_count_Registry),
+        n = c(.$Total_Randomised, .$Total_Registry)
+      )$conf.int[2]*100
+    )
+  )
+
+kable(
+  organ_summary %>% dplyr::select(  
+    starts_with("Yes_display"),
+    starts_with("CI_"),
+    diff_CI,
+    p_value,
+    test_method
+  ),
+  col.names = c(
+    "Registry (n, %)",
+    "Randomised (n, %)",
+    "Registry 95% CI",
+    "Randomised 95% CI",
+    "Difference 95% CI",
+    "p-value",
+    "Test Method"
+  ),
+  caption = "Table5: Vasopressor/Inotrope Use Comparison Between Groups",
+  align = c("l", "l", "l", "l", "l", "c", "l")
+) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+#plot
+df_summary <- combined_organ %>%
+  group_by(Group, Vasopressor_use) %>%
+  count(name = "n") %>%               
+  group_by(Group) %>%
+  mutate(prop = n / sum(n))           
+
+ggplot(df_summary, aes(x = Group, y = prop, fill = Vasopressor_use)) +
+  geom_col(width = 0.6) + 
+  geom_text(
+    aes(label = sprintf("%d (%.1f%%)", n, prop * 100)),
+    position = position_stack(vjust = 0.5),  
+    color = "white",
+    size = 4
+  ) +
+  scale_fill_manual(values = c("No"  = "#4daf4a",
+                               "Yes" = "#e41a1c")) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title    = "Figure7.1 : Vasopressor/Inotrope Use by Group",
+    subtitle = sprintf("Pearson's Chi-squared test, p = %.3f", organ_test$p.value),
+    x        = NULL,
+    y        = "Percentage",
+    fill     = "Vasopressor Use"
+  ) +
+  
+  theme_minimal() +
+  theme(legend.position = "top")
+
+
+ggplot(organ_summary, aes(x = Yes_prop_Randomised - Yes_prop_Registry, y = "Vasopressor Use")) +
+  geom_point(size = 3, color = "#377eb8") +
+  geom_errorbarh(
+    aes(xmin = as.numeric(sub("% to.*", "", diff_CI))/100,
+        xmax = as.numeric(sub(".*to (.*)%", "\\1", diff_CI))/100),
+    height = 0.1, color = "#377eb8", size = 1
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_x_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Figure7.2 : Difference in Vasopressor Use Between Groups",
+    x = "Randomised - Registry Difference (95% CI)",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+#Severity score (APACHE)--only in randomised_data
+```{r}
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(patchwork)
+
+calculate_apache_stats <- function(data8, group_name) {
+  if (!"Bas_APACHEScore" %in% names(data8)) {
+    return(tibble(
+      Variable = "APACHE Score",
+      Group    = group_name,
+      n        = 0,
+      Mean     = NA_real_,
+      SD       = NA_real_,
+      Median   = NA_real_,
+      Q1       = NA_real_,
+      Q3       = NA_real_,
+      Min      = NA_real_,
+      Max      = NA_real_,
+      Missing  = NA_integer_
+    ))
+  }
+
+  data8 %>%
+    summarise(
+      Variable = "APACHE Score",
+      Group    = group_name,
+      n        = sum(!is.na(Bas_APACHEScore)),
+      Mean     = mean(Bas_APACHEScore, na.rm = TRUE),
+      SD       = sd(Bas_APACHEScore, na.rm = TRUE),
+      Median   = median(Bas_APACHEScore, na.rm = TRUE),
+      Q1       = quantile(Bas_APACHEScore, 0.25, na.rm = TRUE),
+      Q3       = quantile(Bas_APACHEScore, 0.75, na.rm = TRUE),
+      Min      = min(Bas_APACHEScore, na.rm = TRUE),
+      Max      = max(Bas_APACHEScore, na.rm = TRUE),
+      Missing  = sum(is.na(Bas_APACHEScore))
+    )
+}
+
+apache_stats <- bind_rows(
+  calculate_apache_stats(registry_data,   "Registry"),
+  calculate_apache_stats(randomised_data, "Randomised")
+)
+set.seed(999) 
+if (nrow(randomised_data) > 5000) {
+  apache_sample <- sample(randomised_data$Bas_APACHEScore, 5000)
+} else {
+  apache_sample <- randomised_data$Bas_APACHEScore
+}
+shapiro_test <- shapiro.test(apache_sample)
+
+apache_table <- apache_stats %>%
+  mutate(across(Mean:Max, ~ round(., 1))) %>%
+  mutate(
+    IQR = sprintf("%.1f-%.1f", Q1, Q3),
+    Shapiro_test = ifelse(
+      Group == "Randomised", 
+      sprintf("W = %.3f, p = %.2e", shapiro_test$statistic, shapiro_test$p.value),
+      NA
+    )
+  ) %>%
+  dplyr::select(
+    Variable, Group, n, Mean, SD, Median, IQR, Min, Max, Missing, Shapiro_test
+  )
+
+kable(apache_table,
+      col.names = c("Variable", "Group", "n", "Mean", "SD", "Median", "IQR", 
+                   "Min", "Max", "Missing", "Shapiro-Wilk Test"),
+      caption = "Table6: APACHE II Score Descriptive Statistics",
+      align = c("l", "l", "c", "r", "r", "r", "r", "r", "r", "r", "l")) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+# plot
+ggplot(randomised_data, aes(x = Bas_APACHEScore)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30, 
+                 fill = "#66c2a5", alpha = 0.8) +
+  geom_density(color = "#fc8d62", linewidth = 1) +
+  labs(title = "Figure8: APACHE Score Distribution in Randomised Group",
+       subtitle = paste("Shapiro-Wilk: W =", round(shapiro_test$statistic, 3),
+                       "p =", format.pval(shapiro_test$p.value, digits = 2)),
+       x = "APACHE II Score", y = "Density") +
+  theme_minimal()
+
+
+#The data of the Randomised group has a certain skewness (rightward skewness as seen from the chart), and does not fully conform to the normal distribution. The Q-Q plot and Shapiro-Wilk test results indicate that there are significant differences between the distribution of the data and the normal distribution.
+```
+
+#### Baseline laboratory variable ###
+# baseline  creatinine
+```{r}
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(patchwork)
+library(flextable)
+library(readr)    
+
+clean_creatinine <- function(df9) {
+  df9 %>%
+    mutate(
+      Creatinine_umol = parse_number(
+        as.character(Bas_Creatinine_umol),
+        locale = locale(grouping_mark = ",")
+      ),
+      Creatinine_category = case_when(
+        is.na(Creatinine_umol)                         ~ "Missing",
+        Creatinine_umol < 60                           ~ "Low (<60)",
+        Creatinine_umol >= 60 & Creatinine_umol <= 120 ~ "Normal (60-120)",
+        Creatinine_umol > 120                          ~ "High (>120)",
+        TRUE                                           ~ "Other"
+      ),
+      Creatinine_category = factor(
+        Creatinine_category,
+        levels = c("Low (<60)", "Normal (60-120)", "High (>120)", "Missing")
+      )
+    ) %>%
+    dplyr::select(Creatinine_umol, Creatinine_category)
+}
+
+calculate_crea_stats <- function(df, group_name) {
+  values <- df$Creatinine_umol
+  sh <- if (sum(!is.na(values)) >= 3 && sum(!is.na(values)) <= 5000) {
+    shapiro.test(values)
+  } else if (sum(!is.na(values)) > 5000) {
+    shapiro.test(sample(values[!is.na(values)], 5000))
+  } else {
+    NULL
+  }
+  
+  df %>%
+    summarise(
+      Group     = group_name,
+      N         = sum(!is.na(Creatinine_umol)),
+      Mean      = round(mean(Creatinine_umol, na.rm = TRUE), 1),
+      SD        = round(sd(Creatinine_umol, na.rm = TRUE), 1),
+      Median    = round(median(Creatinine_umol, na.rm = TRUE), 1),
+      Q1        = round(quantile(Creatinine_umol, 0.25, na.rm = TRUE), 1),
+      Q3        = round(quantile(Creatinine_umol, 0.75, na.rm = TRUE), 1),
+      Missing   = sum(is.na(Creatinine_umol)),
+      Shapiro_W = if (!is.null(sh)) round(sh$statistic, 3) else NA_real_,
+      Shapiro_p = if (!is.null(sh)) sh$p.value else NA_real_
+    ) 
+}
+
+registry_crea   <- clean_creatinine(registry_data)   %>% mutate(Group = "Registry")
+randomised_crea <- clean_creatinine(randomised_data) %>% mutate(Group = "Randomised")
+
+crea_stats <- bind_rows(
+  calculate_crea_stats(registry_crea,   "Registry"),
+  calculate_crea_stats(randomised_crea, "Randomised")
+)
+
+combined_crea <- bind_rows(registry_crea, randomised_crea)
+
+if (all(crea_stats$Shapiro_p > 0.05, na.rm = TRUE)) {
+  test_method <- "Student's t-test"
+  test <- t.test(Creatinine_umol ~ Group, data = combined_crea)
+} else {
+  test_method <- "Wilcoxon rank-sum"
+  test <- wilcox.test(Creatinine_umol ~ Group, data = combined_crea)
+}
+
+final_table <- crea_stats %>%
+  mutate(
+    Mean      = sprintf("%.1f", Mean),
+    SD        = sprintf("%.1f", SD),
+    Median    = sprintf("%.1f", Median),
+    Q1        = sprintf("%.1f", Q1),
+    Q3        = sprintf("%.1f", Q3),
+    Shapiro_W = sprintf("%.3f", Shapiro_W),   
+    Shapiro_p = sprintf("%.3e", Shapiro_p)    
+  ) %>%
+  flextable() %>%
+  set_header_labels(
+    Group      = "Group",
+    N          = "n",
+    Mean       = "Mean",
+    SD         = "SD",
+    Median     = "Median",
+    Q1         = "Q1",
+    Q3         = "Q3",
+    Missing    = "Missing",
+    Shapiro_W  = "Shapiro–Wilk W",
+    Shapiro_p  = "p-value"
+  ) %>%
+  add_footer_lines(
+    values = sprintf(
+      "%s on Creatinine_umol: stat = %.3f, p = %.2e",
+      test_method,
+      as.numeric(test$statistic),
+      test$p.value
+    )
+  ) %>%
+  set_caption("Table 7: Baseline Creatinine (μmol/L) Comparison") %>%
+  theme_zebra()
+final_table
+
+#plot
+bind_rows(registry_crea, randomised_crea) %>%
+  count(Group, Creatinine_category) %>%
+  group_by(Group) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(Group, prop, fill = Creatinine_category)) +
+    geom_col(position = "fill") +
+    geom_text(aes(label = scales::percent(prop, accuracy = 0.1)),
+              position = position_fill(vjust = 0.5),
+              color = "white", size = 3) +
+    scale_fill_brewer(palette = "Set2") +
+    scale_y_continuous(labels = scales::percent) +
+    labs(title = "Figure9 : Creatinine Categories by Group",
+         y = "Percentage", fill = "Creatinine Category") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+#The mean and median of the Registry group and the Randomised group are close, but the standard deviation of the Registry group is slightly higher, indicating that the data of this group fluctuates greatly. The p value was 0.451, indicating that there was no significant difference between the two groups.
+```
+
+###Category for analysis--Baseline microbiological variable###
+#Influenza
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+
+clean_influenza_data <- function(df, is_randomised = FALSE) {
+  prefix <- if (is_randomised) "" else "Reg"
+  
+  df %>%
+    transmute(
+      Group = ifelse(is_randomised, "Randomised", "Registry"),
+      InfluenzaA = case_when(
+        tolower(trimws(!!sym(paste0(prefix, "Mic_InfluenzaA")))) == "positive" ~ 1L,
+        tolower(trimws(!!sym(paste0(prefix, "Mic_InfluenzaA")))) == "negative" ~ 0L,
+        TRUE ~ NA_integer_
+      ),
+      InfluenzaB = case_when(
+        tolower(trimws(!!sym(paste0(prefix, "Mic_InfluenzaB")))) == "positive" ~ 1L,
+        tolower(trimws(!!sym(paste0(prefix, "Mic_InfluenzaB")))) == "negative" ~ 0L,
+        TRUE ~ NA_integer_
+      ),
+      across(
+        c(paste0(prefix, "Mic_PBCHaemophilusInfluenzae"),
+        paste0(prefix, "Mic_PPAHaemophilusInfluenzae"),
+        paste0(prefix, "Mic_PLRTHaemophilusInfluenzae")),
+        ~ case_when(
+          tolower(trimws(.x)) == "yes" ~ 1L,
+          tolower(trimws(.x)) == "no" ~ 0L,
+          TRUE ~ NA_integer_
+        )
+      )
+    ) %>%
+    rename_with(~ gsub("^Reg", "", .x), starts_with("Reg"))
+}
+
+influenza_data <- bind_rows(
+  clean_influenza_data(registry_data, FALSE),
+  clean_influenza_data(randomised_data, TRUE)
+)
+
+influenza_vars <- c("InfluenzaA", "InfluenzaB")
+
+analyze_influenza_var <- function(var) {
+  stats <- influenza_data %>%
+    filter(!is.na(!!sym(var))) %>%
+    group_by(Group) %>%
+    summarise(
+      n_total = n(),
+      n_pos = sum(!!sym(var)),
+      prop_pos = n_pos / n_total,
+      .groups = "drop"
+    ) %>%
+    pivot_wider(
+      names_from = Group,
+      values_from = c(n_total, n_pos, prop_pos)
+    )
+  
+  cont_table <- table(
+    influenza_data[[var]],
+    influenza_data$Group,
+    useNA = "no"
+  )
+  
+  if (all(dim(cont_table) == c(2,2))) {
+    if (any(cont_table < 5)) {
+      test <- fisher.test(cont_table)
+      method <- "Fisher's exact"
+    } else {
+      test <- chisq.test(cont_table)
+      method <- "Chi-squared"
+    }
+    p_val <- test$p.value
+  } else {
+    p_val <- NA_real_
+    method <- NA_character_
+  }
+
+  tibble(
+    Variable = var,
+    Registry = sprintf("%d/%d (%.1f%%)", 
+                      stats$n_pos_Registry, stats$n_total_Registry,
+                      stats$prop_pos_Registry * 100),
+    Randomised = sprintf("%d/%d (%.1f%%)",
+                        stats$n_pos_Randomised, stats$n_total_Randomised,
+                        stats$prop_pos_Randomised * 100),
+    Missing_Registry = sum(is.na(influenza_data[[var]][influenza_data$Group == "Registry"])),
+    Missing_Randomised = sum(is.na(influenza_data[[var]][influenza_data$Group == "Randomised"])),
+    p_value = ifelse(is.na(p_val), NA, sprintf("%.3f", p_val)),
+    test_method = method
+  )
+}
+
+influenza_results <- map_dfr(influenza_vars, analyze_influenza_var)
+
+print(influenza_results)
+
+# plot
+ggplot(influenza_results %>%
+         pivot_longer(
+           cols = c(Registry, Randomised),
+           names_to = "Group",
+           values_to = "Label"
+         ) %>%
+         mutate(
+           pos_rate = as.numeric(gsub(".*\\((.*)%\\).*", "\\1", Label)) / 100
+         ),
+       aes(x = Variable, y = pos_rate, fill = Group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(
+    aes(label = Label),
+    position = position_dodge(width = 0.8),
+    vjust = -0.5, size = 3
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), 
+                     limits = c(0, NA)) +
+  scale_fill_manual(values = c("Registry" = "#66c2a5", "Randomised" = "#fc8d62")) +
+  labs(
+    title = "Figure10 : Positive Rate Comparison of Microbiology Tests",
+    x = NULL,
+    y = "Positive Rate",
+    fill = "Group"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Report of Missing Data
+influenza_missing <- influenza_results %>%
+  dplyr::select(Variable, starts_with("Missing_")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("Missing_"),
+    names_to = "Group",
+    values_to = "n_missing"
+  ) %>%
+  dplyr::mutate(Group = gsub("Missing_", "", Group))
+
+print(influenza_missing)
+
+```
+
+#SARS-CoV-2
+```{r}
+library(dplyr)
+
+dt_SARS_SARS <- bind_rows(
+  registry_data %>%
+    dplyr::select(RegMic_SARSCoV2) %>%        
+    dplyr::rename(Mic_SARSCoV2 = RegMic_SARSCoV2) %>%
+    dplyr::mutate(group_SARS = "Registry"),
+
+  randomised_data %>%
+    dplyr::select(Mic_SARSCoV2) %>%           
+    dplyr::mutate(group_SARS = "Randomised")
+) %>%
+  filter(Mic_SARSCoV2 %in% c("Positive", "Negative")) %>%
+  mutate(
+    pos_SARS = (Mic_SARSCoV2 == "Positive")
+  )
+
+summary_props_SARS <- dt_SARS_SARS %>%
+  dplyr::group_by(group_SARS) %>%
+  dplyr::summarise(
+    n_SARS         = n(),
+    positives_SARS = sum(pos_SARS),
+    prop_SARS      = positives_SARS / n_SARS,
+    .groups = "drop"
+  ) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    ci_SARS       = list(prop.test(positives_SARS, n_SARS, correct = FALSE)$conf.int),
+    CI_low_SARS   = ci_SARS[[1]],
+    CI_high_SARS  = ci_SARS[[2]]
+  ) %>%
+  dplyr::select(-ci_SARS)
+
+#print(summary_props_SARS)
+
+
+prop_res_SARS <- prop.test(
+  x       = summary_props_SARS$positives_SARS,
+  n       = summary_props_SARS$n_SARS,
+  correct = FALSE
+)
+
+summary_SARS <- summary_props_SARS %>%
+  transmute(
+    group_SARS,
+    n_SARS,
+    Positive_SARS = sprintf("%d (%.1f%%)", positives_SARS, prop_SARS * 100),
+    `CI_SARS`     = sprintf("[%.1f%%, %.1f%%]", CI_low_SARS * 100, CI_high_SARS * 100),
+    p_value_SARS  = if_else(row_number() == 1,
+                           sprintf("%.3f", prop_res_SARS$p.value),
+                           "")
+  ) %>%
+  pivot_wider(
+    names_from  = group_SARS,
+    values_from = c(n_SARS, Positive_SARS, CI_SARS, p_value_SARS),
+    names_glue  = "{group_SARS}_{.value}"
+  )
+
+summary_SARS %>%
+  kable(
+    format    = "markdown",
+    col.names = c(
+      "Reg_n", "Ran_n",
+      "Reg_Positive", "Ran_Positive",
+      "Reg_CI", "Ran_CI",
+      "Reg_pvalue", "Ran_pvalue"
+    ),
+    caption = "Mic_SARSCoV2 Positive rate comparison"
+  )
+
+#plot
+library(ggplot2)
+sars_stats <- summary_props_SARS %>%
+  rename(
+    Group = group_SARS,
+    prop_positive = prop_SARS,
+    ci_low = CI_low_SARS,
+    ci_high = CI_high_SARS
+  )
+
+ggplot(sars_stats, aes(x = Group, y = prop_positive, fill = Group)) +
+  geom_col(width = 0.6, alpha = 0.8) +
+  geom_errorbar(
+    aes(ymin = ci_low, ymax = ci_high),
+    width = 0.2, color = "black", linewidth = 0.8
+  ) +
+  geom_text(
+    aes(label = sprintf("%.1f%%", prop_positive * 100)),
+    vjust = -1.5, size = 5, fontface = "bold"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, max(sars_stats$ci_high) * 1.1)
+  ) +
+  scale_fill_manual(values = c("Registry" = "#4daf4a", "Randomised" = "#377eb8")) +
+  labs(
+    title = "Figure 11: SARS-CoV-2 Positive Rate by Group",
+    subtitle = sprintf("p = %.3f", prop_res_SARS$p.value),  # 使用 prop_res_SARS 的 p 值
+    x = NULL,
+    y = "Positive Rate",
+    fill = "Group"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 12)
+  )
+#Report of Missing Data
+missing_data <- bind_rows(
+  registry_data %>%
+    summarise(
+      Group = "Registry",
+      Tested = sum(!is.na(RegMic_SARSCoV2) & trimws(RegMic_SARSCoV2) %in% c("Positive", "Negative")),
+      Missing = sum(is.na(RegMic_SARSCoV2) | !trimws(RegMic_SARSCoV2) %in% c("Positive", "Negative"))
+    ),
+  
+  randomised_data %>%
+    summarise(
+      Group = "Randomised",
+      Tested = sum(!is.na(Mic_SARSCoV2) & trimws(Mic_SARSCoV2) %in% c("Positive", "Negative")),
+      Missing = sum(is.na(Mic_SARSCoV2) | !trimws(Mic_SARSCoV2) %in% c("Positive", "Negative"))
+    )
+)
+
+kable(
+  missing_data,
+  col.names = c("Group", "Tested Cases", "Missing/Invalid Data"),
+  caption = "SARS-CoV-2 Testing Completeness"
+)
+```
+# it is different!
+###Hospitalization data###
+#45 patients' ID
+```{r}
+library(dplyr)
+registry_deceased_ids <- registry_data %>%
+  dplyr::mutate(
+    Death_Flag = as.integer(
+      (coalesce(RegDis_UltHospDischargeStatus, "") == "Deceased") |
+      (coalesce(RegDis_HospDischargeStatus,    "") == "Deceased")
+    ),
+    group      = "Registry",
+    patient_id = as.character(RegistryPatientID)
+  ) %>%
+  dplyr::filter(Death_Flag == 1) %>%
+  dplyr::select(group, patient_id) %>%
+  dplyr::distinct()
+
+registry_deceased_ids <- registry_data %>%
+  dplyr::mutate(
+    Death_Flag = as.integer(
+      (coalesce(RegDis_UltHospDischargeStatus, "") == "Deceased") |
+      (coalesce(RegDis_HospDischargeStatus,    "") == "Deceased")
+    ),
+    group      = "Registry",
+    patient_id = as.character(RegistryPatientID)
+  ) %>%
+  dplyr::filter(Death_Flag == 1) %>%
+  dplyr::select(group, patient_id) %>%
+  dplyr::distinct()
+
+randomised_deceased_ids <- randomised_data %>%
+  dplyr::mutate(
+    Death_Flag = as.integer(
+      (coalesce(Dis_UltHospDischargeStatus, "") == "Deceased") |
+      (coalesce(Dis_HospDischargeStatus,    "") == "Deceased")
+    ),
+    group      = "Randomised",
+    patient_id = as.character(StudyPatientID)
+  ) %>%
+  dplyr::filter(
+    Death_Flag == 1,
+    patient_id != "202200013"    
+  ) %>%
+  dplyr::select(group, patient_id) %>%
+  dplyr::distinct()
+
+combined_deceased_ids_df <- bind_rows(
+  registry_deceased_ids,
+  randomised_deceased_ids
+)
+
+message("Total deceased patients: ", nrow(combined_deceased_ids_df))
+
+knitr::kable(
+  combined_deceased_ids_df,
+  col.names = c("Group", "Patient ID")
+)
+```
+
+#Hospital Total OutcomeTable2
+#Table2.1:In hospital mortality 
+```{r}
+library(stringr)
+library(tibble)
+library(lubridate)
+library(dplyr)
+
+registry_summary <- registry_data %>%
+  mutate(
+    EL_HospAdmission = suppressWarnings(parse_date_time(
+      EL_HospAdmission,
+      orders = c("Y-m-d H:M:S", "Y-m-d", "d/m/Y H:M", "d/m/Y")
+    )),
+    RegDis_HospDischargeDateTime = suppressWarnings(parse_date_time(
+      RegDis_HospDischargeDateTime,
+      orders = c("Y-m-d H:M:S", "Y-m-d", "d/m/Y H:M", "d/m/Y")
+    )),
+    RegDis_UltHospDischargeDate = suppressWarnings(parse_date_time(
+      RegDis_UltHospDischargeDate,
+      orders = c("Y-m-d H:M:S", "Y-m-d", "d/m/Y H:M", "d/m/Y")
+    ))
+  ) %>%
+  mutate(
+    LOS = case_when(
+      !is.na(RegDis_UltHospDischargeDate) ~ as.numeric(difftime(RegDis_UltHospDischargeDate, EL_HospAdmission, units = "days")),
+      !is.na(RegDis_HospDischargeDateTime) ~ as.numeric(difftime(RegDis_HospDischargeDateTime, EL_HospAdmission, units = "days")),
+      TRUE                                 ~ NA_real_
+    ),
+    Death_Flag = as.integer(
+      (coalesce(RegDis_UltHospDischargeStatus, "") == "Deceased") |
+      (coalesce(RegDis_HospDischargeStatus,    "") == "Deceased")
+    )
+  )
+
+randomised_summary <- randomised_data %>%
+  mutate(
+    EL_HospAdmission              = suppressWarnings(parse_date_time(
+      EL_HospAdmission,
+      orders = c("Y-m-d H:M:S", "Y-m-d", "d/m/Y H:M", "d/m/Y")
+    )),
+    Dis_HospitalDischargeDateTime = suppressWarnings(parse_date_time(
+      Dis_HospitalDischargeDateTime,
+      orders = c("Y-m-d H:M:S", "Y-m-d", "d/m/Y H:M", "d/m/Y")
+    )),
+    Dis_UltHospDischargeDate      = suppressWarnings(parse_date_time(
+      Dis_UltHospDischargeDate,
+      orders = c("Y-m-d H:M:S", "Y-m-d", "d/m/Y H:M", "d/m/Y")
+    ))
+  ) %>%
+  mutate(
+    Dis_HospDischargeStatus    = str_trim(Dis_HospDischargeStatus),
+    Dis_UltHospDischargeStatus = str_trim(Dis_UltHospDischargeStatus)
+  ) %>%
+  mutate(
+    LOS = case_when(
+      !is.na(Dis_UltHospDischargeDate)      ~ as.numeric(difftime(Dis_UltHospDischargeDate,      EL_HospAdmission, units = "days")),
+      !is.na(Dis_HospitalDischargeDateTime) ~ as.numeric(difftime(Dis_HospitalDischargeDateTime, EL_HospAdmission, units = "days")),
+      TRUE                                  ~ NA_real_
+    ),
+    Death_Flag = as.integer(coalesce(Dis_HospDischargeStatus, "") == "Deceased")
+  )
+
+n_registry     <- nrow(registry_summary)
+deaths_registry  <- sum(registry_summary$Death_Flag, na.rm = TRUE)
+surv_registry    <- n_registry - deaths_registry
+
+n_randomised  <- nrow(randomised_summary)
+deaths_randomised <- sum(randomised_summary$Death_Flag, na.rm = TRUE)
+surv_randomised   <- n_randomised - deaths_randomised
+
+p_reg   <- deaths_registry / n_registry
+p_rand  <- deaths_randomised / n_randomised
+
+RR  <- p_rand / p_reg
+odds_reg  <- deaths_registry / surv_registry
+odds_rand <- deaths_randomised / surv_randomised
+OR  <- odds_rand / odds_reg
+
+results <- tibble(
+  Group         = c("Registry", "Randomised"),
+  N             = c(n_registry, n_randomised),
+  Deaths        = c(deaths_registry, deaths_randomised),
+  Survivors     = c(surv_registry, surv_randomised),
+  MortalityRate = sprintf("%.2f%%", 100 * c(p_reg, p_rand))
+)
+
+# OR and RR
+metrics <- tibble(
+  Metric = c("Relative Risk (RR)", "Odds Ratio (OR)"),
+  Value  = sprintf("%.2f", c(RR, OR))
+)
+
+print(results)
+print(metrics)
+
+results <- tibble(
+  Group        = c("Registry", "Randomised"),
+  N            = c(n_registry, n_randomised),
+  Deaths       = c(deaths_registry, deaths_randomised),
+  Survivors    = c(surv_registry, surv_randomised),
+  MortalityRate= sprintf("%.2f%%", 100 * c(deaths_registry / n_registry, deaths_randomised / n_randomised))
+)
+
+plot_data <- results %>%
+  # select(Group, N, Deaths, Survivors)  
+  pivot_longer(
+    cols      = c(Deaths, Survivors),
+    names_to  = "Outcome",
+    values_to = "Count"
+  ) %>%
+  mutate(
+    Percentage = Count / N * 100  
+  )
+
+ggplot(plot_data, aes(x = Group, y = Count, fill = Outcome)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(
+    aes(label = sprintf("%d (%.1f%%)", Count, Percentage)),
+    position = position_dodge(width = 0.8),
+    vjust     = -0.3,
+    size      = 3.5
+  ) +
+  scale_fill_manual(
+    values = c("Deaths" = "#D55E00", "Survivors" = "#009E73"),
+    labels = c("Deaths" = "The number of death", "Survivors" = "The number of survivors")
+  ) +
+  labs(
+    title    = "Figure12:Comparison of the number of deaths and survivors",
+    subtitle = "Both quantity and percentage are displayed simultaneously in the bar chart",
+    x        = "Research Group",
+    y        = "number",
+    fill     = "Result classification"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position     = "top",
+    axis.text.x         = element_text(size = 12),
+    axis.title          = element_text(size = 13),
+    plot.title          = element_text(size = 15, face = "bold"),
+    plot.subtitle       = element_text(size = 13)
+  )
+
+```
+
+#Table2.2 and Table2.3
+```{r}
+library(survival)
+library(dplyr)
+library(lubridate)
+
+reg_surv_hosp2.2 <- registry_summary %>%
+  filter(!is.na(EL_HospAdmission),
+         !is.na(LOS),
+         !is.na(Death_Flag)) %>%
+  mutate(
+    time   = ceiling(LOS),
+    status = Death_Flag,
+    group  = "Registry"
+  ) %>%
+  select(time, status, group)
+
+rand_surv_hosp2.2 <- randomised_summary %>%
+  filter(!is.na(EL_HospAdmission),
+         !is.na(LOS),
+         !is.na(Death_Flag)) %>%
+  mutate(
+    time   = ceiling(LOS),
+    status = Death_Flag,
+    group  = "Randomised"
+  ) %>%
+  select(time, status, group)
+
+combined_surv_hosp2.2 <- bind_rows(reg_surv_hosp2.2, rand_surv_hosp2.2) %>%
+  mutate(group = factor(group, levels = c("Registry", "Randomised")))
+
+cox_fit <- coxph(Surv(time, status) ~ group, data = combined_surv_hosp2.2)
+
+summary(cox_fit)
+
+hr       <- exp(coef(cox_fit))["groupRandomised"]
+conf_int <- exp(confint(cox_fit))["groupRandomised", ]
+
+cat("Hazard Ratio for Randomised vs Registry:\n")
+cat("HR =", round(hr, 3),
+    " 95% CI = (", round(conf_int[1], 3), ",", round(conf_int[2], 3), ")\n")
+```
+
+```{r}
+library(dplyr)
+library(survival)
+library(survminer)
+
+n_registry_hosp2.2      <- nrow(registry_summary)
+deaths_registry_hosp2.2 <- sum(registry_summary$Death_Flag, na.rm = TRUE)
+surv_registry_hosp2.2   <- n_registry_hosp2.2 - deaths_registry_hosp2.2
+
+n_randomised_hosp2.2      <- nrow(randomised_summary)
+deaths_randomised_hosp2.2 <- sum(randomised_summary$Death_Flag, na.rm = TRUE)
+surv_randomised_hosp2.2   <- n_randomised_hosp2.2 - deaths_randomised_hosp2.2
+
+a_hosp2.2 <- deaths_randomised_hosp2.2
+b_hosp2.2 <- surv_randomised_hosp2.2
+c_hosp2.2 <- deaths_registry_hosp2.2
+d_hosp2.2 <- surv_registry_hosp2.2
+
+RR_hosp2.2 <- (a_hosp2.2 / (a_hosp2.2 + b_hosp2.2)) / (c_hosp2.2 / (c_hosp2.2 + d_hosp2.2))
+OR_hosp2.2 <- (a_hosp2.2 / b_hosp2.2) / (c_hosp2.2 / d_hosp2.2)
+
+ft_hosp2.2    <- fisher.test(matrix(c(a_hosp2.2, b_hosp2.2, c_hosp2.2, d_hosp2.2),
+                                   nrow = 2, byrow = TRUE))
+OR_CI_hosp2.2 <- ft_hosp2.2$conf.int
+
+rates_hosp2.2 <- tibble(
+  Group         = c("Randomised", "Registry"),
+  N             = c(a_hosp2.2 + b_hosp2.2, c_hosp2.2 + d_hosp2.2),
+  Deaths        = c(a_hosp2.2, c_hosp2.2),
+  Survivors     = c(b_hosp2.2, d_hosp2.2),
+  MortalityRate = sprintf("%.2f%%",
+                          100 * c(a_hosp2.2 / (a_hosp2.2 + b_hosp2.2),
+                                  c_hosp2.2 / (c_hosp2.2 + d_hosp2.2)))
+)
+
+metrics_hosp2.2 <- tibble(
+  Metric   = c("Relative Risk (RR)", "Odds Ratio (OR)"),
+  Estimate = sprintf("%.2f", c(RR_hosp2.2, OR_hosp2.2)),
+  CI_Low   = c(NA, sprintf("%.2f", OR_CI_hosp2.2[1])),
+  CI_High  = c(NA, sprintf("%.2f", OR_CI_hosp2.2[2]))
+)
+
+print(rates_hosp2.2)
+print(metrics_hosp2.2)
+
+km_data_hosp2.2 <- bind_rows(
+  registry_summary %>%
+    transmute(
+      time   = LOS,
+      status = Death_Flag,
+      cohort = "Registry"
+    ),
+  randomised_summary %>%
+    transmute(
+      time   = LOS,
+      status = Death_Flag,
+      cohort = "Randomised"
+    )
+) %>%
+  mutate(cohort = factor(cohort, levels = c("Registry", "Randomised")))
+
+fit_surv <- survfit(Surv(time, status) ~ cohort, data = km_data_hosp2.2)
+
+ggsurvplot(
+  fit_surv,
+  data              = km_data_hosp2.2,
+  risk.table        = TRUE,
+  pval              = TRUE,
+  risk.table.height = 0.25,
+  title             = "Figure13.1: Kaplan–Meier Survival Curve",
+  xlab              = "Days after admission",
+  ylab              = "Survival probability"
+)
+
+ggsurvplot(
+  fit_surv,
+  data   = km_data_hosp2.2,
+  fun    = "event",
+  pval   = TRUE,
+  title  = "Figure13.2: Kaplan–Meier Cumulative Occurrence of Death",
+  xlab   = "Days after admission",
+  ylab   = "Cumulative death probability"
+)
+```
+
+#Table2.4: Discharge destination of survivors
+```{r}
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(tibble)
+
+# —— Registry survivors’ discharge destination ——  
+registry_dest <- registry_summary %>%
+  filter(Death_Flag == 0) %>%                            
+  mutate(
+    Destination_raw = RegDis_Destination                 
+  ) %>%
+  mutate(
+    Destination_Cat = case_when(
+      Destination_raw == "Rehabilitation hospital"                         ~ "Rehab hosp",
+      Destination_raw == "Transfer to another acute hospital"             ~ "Transfer",
+      is.na(Destination_raw) | Destination_raw == ""                      ~ "Unknown",
+      Destination_raw == "Nursing home or long-term care facility"        ~ "Nursing home or LTC ",
+      Destination_raw == "Home"                                           ~ "Home",
+      TRUE                                                                 ~ Destination_raw  # fallback, if other values appear
+    )
+  )
+registry_dest_summary <- registry_dest %>%
+  group_by(Destination_Cat) %>%
+  summarise(
+    Count = n()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Percentage = Count / sum(Count) * 100
+  )
+
+print(registry_dest_summary)
+
+ggplot(registry_dest_summary, aes(x = reorder(Destination_Cat, -Count), y = Count)) +
+  geom_col(fill = "steelblue") +   # geom_col() is equivalent to geom_bar(stat="identity")
+  geom_text(aes(label = sprintf("%d (%.1f%%)", Count, Percentage)),
+            vjust = -0.5, size = 3.5) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  labs(
+    title = "Figure14.1 (Registry): Discharge Destination for Survivors",
+    subtitle = "Count and Percentage",
+    x = "Discharge Destination",
+    y = "Number of Patients"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# —— Randomised survivors’ discharge destination ——  
+randomised_dest <- randomised_summary %>%
+  filter(Death_Flag == 0) %>%                            # only survivors
+  mutate(
+    Destination_raw = Dis_Destination                     # take the randomised raw field
+  ) %>%
+  mutate(
+    Destination_Cat = case_when(
+      Destination_raw == "Rehabilitation hospital"                         ~ "Rehab hosp",
+      Destination_raw == "Transfer to another acute hospital"             ~ "Transfer",
+      is.na(Destination_raw) | Destination_raw == ""                      ~ "Unknown",
+      Destination_raw == "Nursing home or long-term care facility"        ~ "Nursing home or LTC",
+      Destination_raw == "Home"                                           ~ "Home",
+      TRUE                                                                 ~ Destination_raw
+    )
+  )
+
+randomised_dest_summary <- randomised_dest %>%
+  group_by(Destination_Cat) %>%
+  summarise(
+    Count = n()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Percentage = Count / sum(Count) * 100
+  )
+
+print(randomised_dest_summary)
+
+ggplot(randomised_dest_summary, aes(x = reorder(Destination_Cat, -Count), y = Count)) +
+  geom_col(fill = "orange") + 
+  geom_text(aes(label = sprintf("%d (%.1f%%)", Count, Percentage)),
+            vjust = -0.5, size = 3.5) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  labs(
+    title = "Figure14.2 (Randomised): Discharge Destination for Survivors",
+    subtitle = "Count and Percentage",
+    x = "Discharge Destination",
+    y = "Number of Patients"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+library(dplyr)
+library(ggplot2)
+
+combined_dest_summary <- bind_rows(
+  registry_dest_summary    %>% mutate(Group = "Registry"),
+  randomised_dest_summary %>% mutate(Group = "Randomised")
+)
+
+ggplot(combined_dest_summary,
+       aes(x = reorder(Destination_Cat, -Count),
+           y = Count,
+           fill = Group)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = sprintf("%d (%.1f%%)", Count, Percentage)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c(Registry = "steelblue",
+                               Randomised = "orange")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title    = "Figure14: Discharge Destination for Survivors",
+    subtitle = "Count and Percentage, by Group",
+    x        = "Discharge Destination",
+    y        = "Number of Patients",
+    fill     = "Group"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+reg_summary_hosp2.4 <- registry_dest %>%
+  count(Destination_Cat, name = "n_reg_hosp2.4") %>%
+  ungroup()
+
+rand_summary_hosp2.4 <- randomised_dest %>%
+  count(Destination_Cat, name = "n_rand_hosp2.4") %>%
+  ungroup()
+
+N_reg_hosp2.4  <- sum(reg_summary_hosp2.4$n_reg_hosp2.4)
+N_rand_hosp2.4 <- sum(rand_summary_hosp2.4$n_rand_hosp2.4)
+
+dest_table_hosp2.4 <- full_join(
+    reg_summary_hosp2.4,
+    rand_summary_hosp2.4,
+    by = "Destination_Cat"
+  ) %>%
+  replace_na(list(
+    n_reg_hosp2.4  = 0,
+    n_rand_hosp2.4 = 0
+  )) %>%
+  arrange(Destination_Cat)
+
+dest_or_rr_hosp2.4 <- dest_table_hosp2.4 %>%
+  mutate(
+    a_hosp2.4 = n_rand_hosp2.4,
+    b_hosp2.4 = N_rand_hosp2.4 - n_rand_hosp2.4,
+    c_hosp2.4 = n_reg_hosp2.4,
+    d_hosp2.4 = N_reg_hosp2.4 - n_reg_hosp2.4,
+  
+    prop_rand_hosp2.4 = a_hosp2.4 / (a_hosp2.4 + b_hosp2.4),
+    prop_reg_hosp2.4  = c_hosp2.4 / (c_hosp2.4 + d_hosp2.4),
+    # Relative Risk
+    RR_hosp2.4 = prop_rand_hosp2.4 / prop_reg_hosp2.4,
+    # Odds Ratio
+    OR_hosp2.4 = (a_hosp2.4 / b_hosp2.4) / (c_hosp2.4 / d_hosp2.4)
+  ) %>%
+  transmute(
+    Destination_Cat,
+    Registry_N_hosp2.4        = N_reg_hosp2.4,
+    Randomised_N_hosp2.4      = N_rand_hosp2.4,
+    Registry_n_hosp2.4        = c_hosp2.4,
+    Randomised_n_hosp2.4      = a_hosp2.4,
+    Registry_percent_hosp2.4  = sprintf("%.2f%%", 100 * prop_reg_hosp2.4),
+    Randomised_percent_hosp2.4= sprintf("%.2f%%", 100 * prop_rand_hosp2.4),
+    RR_hosp2.4                = sprintf("%.2f", RR_hosp2.4),
+    OR_hosp2.4                = sprintf("%.2f", OR_hosp2.4)
+  )
+
+print(dest_table_hosp2.4)
+print(dest_or_rr_hosp2.4)
+```
+
+###Statistic Analysis###
+```{r}
+library(dplyr)
+
+registry_mut <- registry_data %>%
+  mutate(
+    died = as.integer(
+      (coalesce(RegDis_UltHospDischargeStatus, "") == "Deceased") |
+      (coalesce(RegDis_HospDischargeStatus,    "") == "Deceased")
+    ),
+    Age         = as.numeric(EL_AgeAtFirstEntry),
+    sex         = factor(EL_Sex, levels = c("Male","Female")),
+    vasopressor = factor(EL_VassopressorInotropes48, levels = c("No","Yes")),
+    covid_pos   = factor(
+      case_when(
+        RegMic_SARSCoV2 == "Positive" ~ "Positive",
+        RegMic_SARSCoV2 == "Negative" ~ "Negative",
+        TRUE                           ~ NA_character_
+      ),
+      levels = c("Negative","Positive")
+    ),
+    treatment = 0L
+  )
+
+registry_processed <- dplyr::select(
+  registry_mut,
+  died, treatment, Age, sex, vasopressor, covid_pos
+)
+
+randomised_mut <- randomised_data %>%
+  mutate(
+    died = as.integer(
+      (coalesce(Dis_UltHospDischargeStatus, "") == "Deceased") |
+      (coalesce(Dis_HospDischargeStatus,    "") == "Deceased")
+    ),
+    Age         = as.numeric(EL_AgeAtFirstEntry),
+    sex         = factor(EL_Sex, levels = c("Male","Female")),
+    vasopressor = factor(EL_VassopressorInotropes, levels = c("No","Yes")),
+    covid_pos   = factor(
+      case_when(
+        Mic_SARSCoV2 == "Positive" ~ "Positive",
+        Mic_SARSCoV2 == "Negative" ~ "Negative",
+        TRUE                         ~ NA_character_
+      ),
+      levels = c("Negative","Positive")
+    ),
+    treatment = 1L
+  )
+
+randomised_processed <- dplyr::select(
+  randomised_mut,
+  died, treatment, Age, sex, vasopressor, covid_pos
+)
+
+analysis_data_clean <- bind_rows(registry_processed, randomised_processed) %>%
+  filter(complete.cases(died, treatment, Age, sex, vasopressor, covid_pos))
+#cat("Final number of lines：", nrow(analysis_data_clean), "\n")
+#print(summary(analysis_data_clean))
+```
+#Crude RR and OR
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+tab_death <- analysis_data_clean %>%
+  group_by(treatment) %>%
+  summarise(
+    N         = n(),
+    Deaths    = sum(died),
+    Survivors = N - Deaths,
+    Mortality = Deaths / N
+  )
+print(tab_death)
+
+a <- tab_death$Deaths[tab_death$treatment == 1]
+b <- tab_death$Survivors[tab_death$treatment == 1]
+c <- tab_death$Deaths[tab_death$treatment == 0]
+d <- tab_death$Survivors[tab_death$treatment == 0]
+
+RR <- (a/(a + b)) / (c/(c + d))
+se_logRR <- sqrt(1/a - 1/(a + b) + 1/c - 1/(c + d))
+ci_low_RR  <- exp(log(RR) - 1.96 * se_logRR)
+ci_high_RR <- exp(log(RR) + 1.96 * se_logRR)
+
+OR <- (a/b) / (c/d)
+se_logOR <- sqrt(1/a + 1/b + 1/c + 1/d)
+ci_low_OR  <- exp(log(OR) - 1.96 * se_logOR)
+ci_high_OR <- exp(log(OR) + 1.96 * se_logOR)
+
+cat(sprintf("Crude RR  = %.2f (95%% CI: %.2f – %.2f)\n", RR, ci_low_RR, ci_high_RR))
+cat(sprintf("Crude OR  = %.2f (95%% CI: %.2f – %.2f)\n", OR, ci_low_OR, ci_high_OR))
+
+```
+#Adjusted GLM
+```{r}
+library(dplyr)   
+library(broom)    
+
+analysis_data_clean <- analysis_data_clean %>%
+  mutate(.row = row_number()) %>%
+  left_join(
+    influenza_data %>%
+      mutate(.row = row_number()) %>%
+      select(.row, InfluenzaA, InfluenzaB),
+    by = ".row"
+  ) %>%
+  select(-.row)
+
+model_vars <- list(
+  c("Age"),
+  c("Age", "sex"),
+  c("Age", "sex", "vasopressor"),
+  c("Age", "sex", "vasopressor", "covid_pos"),
+  c("Age", "sex", "vasopressor", "covid_pos","InfluenzaA","InfluenzaB")
+)
+
+fit_and_extract_treatment <- function(var_vec, data) {
+ 
+  rhs <- paste(c("treatment", var_vec), collapse = " + ")
+  fml <- as.formula(paste("died ~", rhs))
+  
+  m <- glm(
+    formula = fml,
+    data    = data,
+    family  = binomial(link = "logit")
+  )
+
+  td <- broom::tidy(m, conf.int = TRUE, exponentiate = TRUE) %>%
+    dplyr::filter(term == "treatment") %>%
+    dplyr::mutate(
+      Model = paste("treatment +", paste(var_vec, collapse = " + "))
+    ) %>%
+    dplyr::select(
+      Model,
+      OR      = estimate,
+      CI_low  = conf.low,
+      CI_high = conf.high,
+      p_value = p.value
+    )
+  
+  return(td)
+}
+
+result_list <- lapply(model_vars, function(vars) {
+  fit_and_extract_treatment(vars, analysis_data_clean)
+})
+
+results_all <- dplyr::bind_rows(result_list)
+
+results_all <- results_all %>%
+  dplyr::select(Model, OR, CI_low, CI_high, p_value)
+
+print(results_all)
+
+results_all <- results_all %>%
+  mutate(
+    Model = factor(
+      Model,
+      levels = c(
+        "treatment + Age",
+        "treatment + Age + sex",
+        "treatment + Age + sex + vasopressor",
+        "treatment + Age + sex + vasopressor + covid_pos",
+        "treatment + Age + sex + vasopressor + covid_pos + InfluenzaA + InfluenzaB"
+      )
+    )
+  )
+
+library(ggplot2)
+library(forcats)
+library(stringr)
+results_all$Model_wrapped <- str_wrap(results_all$Model, width = 30)
+
+ggplot(results_all,
+       aes(x = OR,
+           y = fct_rev(Model_wrapped))) +
+  geom_errorbarh(aes(xmin = CI_low, xmax = CI_high),
+                 height = 0.2, colour = "grey70") +
+  geom_point(size = 3, shape = 18, colour = "steelblue") +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "red") +
+  scale_x_continuous(trans = "log10",
+                     breaks = c(0.1, 0.25, 0.5, 1, 2),
+                     labels = c("0.1", "0.25", "0.5", "1", "2"),
+                     expand = expansion(mult = c(0.1, 0.1))) +
+  labs(
+    title = "Figure 15: Forest Plot",
+    x     = "Odds Ratio (log scale)",
+    y     = NULL
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    panel.grid.major.y    = element_blank(),                
+    panel.grid.major.x    = element_line(color = "grey85"), 
+    axis.text.y           = element_text(size = 11, hjust = 0),
+    axis.title.x          = element_text(margin = margin(t = 8)),
+    plot.title            = element_text(face = "bold",
+                                         size = 16,
+                                         hjust = 0.5,
+                                         vjust = 2),
+    plot.margin           = margin(t = 20, r = 20, b = 10, l = 10)  
+  )
+```
+#LASSO‐GLM and PS Weighting
+```{r}
+library(dplyr)       
+library(broom)       
+library(glmnet)      
+library(WeightIt)    
+library(survey)   
+library(grid)
+
+lasso_results <- vector("list", length(model_vars))
+set.seed(2025)
+
+for (i in seq_along(model_vars)) {
+  vars <- model_vars[[i]]
+
+  df_i <- analysis_data_clean %>%
+    select(died, treatment, all_of(vars)) %>%
+    drop_na()
+  
+  x_mat <- model.matrix(died ~ treatment + ., data = df_i)[, -1]
+  y_vec <- df_i$died
+  penalty_f <- c(0, rep(1, ncol(x_mat) - 1))
+  
+  cv_lasso <- cv.glmnet(
+    x           = x_mat,
+    y           = y_vec,
+    family      = "binomial",
+    alpha       = 1,
+    penalty.factor = penalty_f,
+    type.measure   = "deviance"
+  )
+  lambda_sel <- cv_lasso$lambda.1se
+  
+  lasso_fit <- glmnet(
+    x           = x_mat,
+    y           = y_vec,
+    family      = "binomial",
+    alpha       = 1,
+    penalty.factor = penalty_f,
+    lambda      = lambda_sel
+  )
+  beta_treat <- as.numeric(coef(lasso_fit)["treatment", ])
+  or_treat   <- exp(beta_treat)
+  
+  lasso_results[[i]] <- tibble(
+    Method  = "LASSO-GLM",
+    Model   = paste("treatment +", paste(vars, collapse = " + ")),
+    OR      = or_treat,
+    CI_low  = NA_real_,
+    CI_high = NA_real_,
+    extra   = paste0("log-OR=", round(beta_treat, 3))
+  )
+}
+
+lasso_results <- bind_rows(lasso_results)
+print(lasso_results)
+```
+#Summary the four results
+```{r}
+library(dplyr)
+library(broom)
+library(glmnet)
+library(WeightIt)
+library(survey)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+
+tab_crude <- table(
+  Treatment = factor(analysis_data_clean$treatment, levels = c(0, 1),
+                     labels = c("Registry", "Randomised")),
+  Death     = factor(analysis_data_clean$died,      levels = c(0, 1),
+                     labels = c("Survived",  "Died"))
+)
+a <- tab_crude["Randomised", "Died"]
+b <- tab_crude["Randomised", "Survived"]
+c <- tab_crude["Registry",    "Died"]
+d <- tab_crude["Registry",    "Survived"]
+
+crude_OR   <- (a / b) / (c / d)
+se_logOR   <- sqrt(1/a + 1/b + 1/c + 1/d)
+ci_low_OR  <- exp(log(crude_OR) - 1.96 * se_logOR)
+ci_high_OR <- exp(log(crude_OR) + 1.96 * se_logOR)
+
+crude_RR   <- (a / (a + b)) / (c / (c + d))
+se_logRR   <- sqrt(1/a - 1/(a + b) + 1/c - 1/(c + d))
+ci_low_RR  <- exp(log(crude_RR) - 1.96 * se_logRR)
+ci_high_RR <- exp(log(crude_RR) + 1.96 * se_logRR)
+
+adjust_glm <- glm(
+  died ~ treatment + Age + sex + vasopressor + covid_pos,
+  data   = analysis_data_clean,
+  family = binomial(link = "logit")
+)
+adjust_tidy <- broom::tidy(adjust_glm, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term == "treatment") %>%
+  transmute(
+    Method   = "Adjusted-GLM",
+    Model    = "treatment + Age + sex + vasopressor + covid_pos",
+    Estimate = estimate,
+    CI_low   = conf.low,
+    CI_high  = conf.high
+  )
+
+x_mat <- model.matrix(
+  ~ treatment + Age + sex + vasopressor + covid_pos,
+  data = analysis_data_clean
+)[, -1]
+y_vec <- analysis_data_clean$died
+penalty_f <- c(0, rep(1, ncol(x_mat) - 1))
+set.seed(2025)
+cv_lasso <- cv.glmnet(
+  x              = x_mat,
+  y              = y_vec,
+  family         = "binomial",
+  alpha          = 1,
+  penalty.factor = penalty_f,
+  type.measure   = "deviance"
+)
+lasso_fit       <- glmnet(
+  x              = x_mat,
+  y              = y_vec,
+  family         = "binomial",
+  alpha          = 1,
+  penalty.factor = penalty_f,
+  lambda         = cv_lasso$lambda.1se
+)
+beta_lasso      <- as.numeric(coef(lasso_fit)["treatment", ])
+lasso_tidy <- tibble(
+  Method   = "LASSO-GLM",
+  Model    = "treatment + Age + sex + vasopressor + covid_pos (LASSO)",
+  Estimate = exp(beta_lasso),
+  CI_low   = NA_real_,
+  CI_high  = NA_real_
+)
+
+ps_wt <- weightit(
+  formula    = treatment ~ Age + sex + vasopressor + covid_pos,
+  data       = analysis_data_clean,
+  method     = "ps",
+  ps.method  = "glm",
+  estimand   = "ATE",
+  stabilize  = TRUE
+)
+design_ps <- svydesign(
+  ids     = ~1,
+  weights = ps_wt$weights,
+  data    = analysis_data_clean
+)
+ps_mod  <- svyglm(
+  died ~ treatment,
+  design  = design_ps,
+  family  = quasibinomial()
+)
+ps_coefs <- coeftest(ps_mod, vcov = vcovHC(ps_mod, type = "HC3"))
+beta_ps   <- ps_coefs["treatment", "Estimate"]
+se_ps     <- ps_coefs["treatment", "Std. Error"]
+ps_tidy <- tibble(
+  Method   = "PS-Weighted",
+  Model    = "treatment ~ Age + sex + vasopressor + covid_pos (PS)",
+  Estimate = exp(beta_ps),
+  CI_low   = exp(beta_ps - 1.96 * se_ps),
+  CI_high  = exp(beta_ps + 1.96 * se_ps)
+)
+
+crude_or_tidy <- tibble(
+  Method   = "Crude-OR",
+  Model    = "died ~ treatment  (2×2)",
+  Estimate = crude_OR,
+  CI_low   = ci_low_OR,
+  CI_high  = ci_high_OR
+)
+crude_rr_tidy <- tibble(
+  Method   = "Crude-RR",
+  Model    = "died ~ treatment  (2×2)",
+  Estimate = crude_RR,
+  CI_low   = ci_low_RR,
+  CI_high  = ci_high_RR
+)
+
+results_summary <- bind_rows(
+  crude_or_tidy,
+  crude_rr_tidy,
+  adjust_tidy,
+  lasso_tidy,
+  ps_tidy
+) %>%
+  mutate(
+    Method = factor(
+      Method,
+      levels = c("Crude-OR", "Crude-RR", "Adjusted-GLM", "LASSO-GLM", "PS-Weighted")
+    )
+  )
+
+print(results_summary)
+
+forest_plot <- ggplot(results_summary, aes(x = Estimate, y = Method)) +
+  geom_errorbarh(
+    aes(xmin = CI_low, xmax = CI_high),
+    height = 0.2,
+    color = "gray50",
+    na.rm = TRUE
+  ) +
+  geom_point(
+    aes(shape = Method, fill = Method),
+    color = "black",
+    size = 3
+  ) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_continuous(
+    trans  = "log10",
+    breaks = c(0.1, 0.25, 0.5, 1, 2, 4),
+    labels = c("0.1", "0.25", "0.5", "1", "2", "4")
+  ) +
+  labs(
+    title = "Figure16: Comparison of Treatment Effect",
+    x     = "Ratio (log scale)",
+    y     = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.y     = element_text(size = 12),
+    plot.title      = element_text(face = "bold", size = 16),
+    legend.position = "none"
+  )
+
+print(forest_plot)
+```
